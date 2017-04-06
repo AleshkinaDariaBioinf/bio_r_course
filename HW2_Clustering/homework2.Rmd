@@ -1,0 +1,137 @@
+---
+title: "HW2"
+author: "Daria"
+date: '5 апреля 2017 г '
+output: html_document
+---
+
+# clustering homework
+
+Подключаем необходимые библиотеки:
+
+```{r, message=FALSE}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(amap)
+library(dbscan)
+library(ggplot2)
+options(width=120)
+```
+
+Считываем данные:
+
+```{r}
+counts <- read.csv("GSE89225_Illumina_counts.csv", row.names=1)
+conditions <- read.csv("conditions.csv", row.names=1)
+
+```
+
+## Иерархическая кластеризация
+
+Нужна для того, чтобы понимать как ваши образцы соотносятся с дизайном эксперимента, который у вас есть, а также для поиска аутлаеров в вашем эксперименте.
+
+Используем иерархическую клатеризацию для обнаружения аутлаера: возьмем весь датасет с аутлаером, создадим DeseqDataSet объект (дизайн не важен), оставим только 8000 наиболее сильно экспрессирующихся генов (мало экспрессированные гены привносят шум в “паттерны” экспрессии, а так же невольно завышают корреляцию между образцами: ведь они слабо экспрессированы во всех образцах).
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = conditions,
+                              design = ~ tissue + cells)
+dds <- dds[order(rowSums(counts(dds)), decreasing = TRUE),]
+dds_8000 <- dds[1:8000,]
+```
+
+Далее используем rlog(dds) для получения логарифмированных значений экспрессии и посчитаем корреляции между образцами используя cor (результатом будет матрица размера m×mm×m, где m – количество образцов). После этого посчитаем матрицу “непохожести” 1 - cor, и dist объект для этой матрицы.
+
+```{r}
+dds_8000_log <- rlog(dds_8000)
+dds_cor <- cor(assay(dds_8000_log))
+dds_rev_cor <- 1 - dds_cor
+dist_rev_cor <- dist(dds_rev_cor)
+```
+Сделаем кластеризацию с помощью функции hclust, используя три разных метода “связывания” объектов в группы: average, complete and single
+
+```{r}
+clust_avg <- hclust(dist_rev_cor, method = "average")
+clust_com <- hclust(dist_rev_cor, method = "complete")
+clust_singl <- hclust(dist_rev_cor, method = "single")
+```
+
+Построим для каждой график с помощью plot:
+
+```{r}
+plot(clust_avg)
+plot(clust_com)
+plot(clust_singl)
+```
+
+## K-means
+
+Нужна для описания паттернов экспрессии в ваших образцах. 
+Для этого возьмем датасет без аутлаера, создадим DeseqDataSet объект (дизайн не важен), оставим только 8000 экспрессированных генов и используем rlog(dds) для получения логарифмированных значений экспрессии. (то же, что и в случае иерархической)
+
+```{r}
+counts$treg_NBP_patient3 <- NULL
+conditions <- conditions[-which(rownames(conditions)=="treg_NBP_patient3"),]
+
+dds_2 <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = conditions,
+                              design = ~ tissue + cells)
+dds_2 <- dds_2[order(rowSums(counts(dds)), decreasing = TRUE),]
+dds_2_8000 <- dds_2[1:8000,]
+dds_log_2 <- rlog(dds_2_8000)
+
+```
+
+Используем функцию Kmeans из пакета amap с методом “correlation”, c количеством кластеров равным 6. (Вы можете выбрать своё количество кластеров), и максимальным количеством итераций равным 20000
+
+```{r}
+clustering <- Kmeans(assay(dds_log_2), 6, method="correlation", iter.max=20000)
+head(clustering$cluster)
+```
+
+После этого вы можете достать соотвествие каждого гена кластеру с помощью элемента листа с названием “cluster”
+После этого от вас потребуется эту кластеризацию изобразить на хитмапе: гены должны быть отсортированы по кластерам, а столбцы сначала по клеткам, а затем по тканям.
+
+```{r}
+gene_cluster <- clustering$cluster
+
+dds_log_2_a <- assay(dds_log_2)
+
+to_visualise <- dds_log_2_a[order(gene_cluster), order(conditions[, 2], conditions[, 1])]
+to_visualise <- t(apply(to_visualise, 1, function(r) {
+  (r - min(r)) / (max(r) - min(r))
+}))
+
+annotation <- data.frame(cluster=as.factor(gene_cluster))
+
+pheatmap(to_visualise, 
+         show_rownames = F, cluster_rows = F,
+         cluster_cols = F,
+         annotation_col = conditions,
+         annotation_row = annotation)
+```
+
+## Density based algortihms
+
+Как вы наверное помните, у нас есть алгоритмы, которые позволяют находить “плотные” кластеры, и при этом им не нужно указывать число кластеров. Пример такого алгоритма (DBSCAN) был на журнальном клубе посвящённому single-cell RNA-seq. В этом задании от вас потребуется запустить DBSCAN и подобрать к нему аргументы так, чтобы картинка была похожа на что-нибудь разумное.
+
+В архиве находится файлик projection.csv, который содержит в себе результаты анализа данных single-cell RNA-seq, а именно tSNE-проекции всех клеток. По сути каждая клетка здесь определена в двух-мерном пространстве, и клетки транскрипционные профили которых бризки друг к другу находятся на этой проекции близко, а те, что транскрипционно различаются – находятся дальше.
+
+Базовая концепция алгоритма DBSCAN очень простая – для каждой точки, мы можем посмотреть количество точек-соседей, которые находятся к ней ближе чем на какое-то расстояние ϵϵ. Если количество точек, в этой ϵϵ-окрестности больше или равно заранее определенного числа kk, и какие-то из этих точек-соседей уже лежат в кластере – то нашу точку можно в этот кластер добавить.
+
+Пакет dbscan доступен из CRAN, функция dbscan принимает, кроме объекта с точками в пространстве, два аргумента: радиус окружности вокруг точки ϵϵ, в которой мы пытаемся найти достаточноe число соседей, и достаточно число соседей kk в этой окружности.
+
+```{r}
+proj <- read.csv("projection.csv", row.names = 1)
+#plot(proj)
+ggplot(data=proj, aes(x=TSNE.1, y=TSNE.2))+geom_point(size=1)+theme_bw()
+
+proj_dbscan <- dbscan(proj, eps = 3, minPts = 3)
+proj$cluster <- as.factor(proj_dbscan$cluster)
+
+ggplot(proj, aes(x=TSNE.1, y=TSNE.2, col=cluster))+geom_point()+theme_bw()
+```
+
+
+
